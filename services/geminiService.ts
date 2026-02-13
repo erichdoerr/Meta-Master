@@ -1,6 +1,5 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { AppSettings, ApiResponse, HeroAnalysisResponse, FullMapStrategy, Role, Recommendation } from "../types";
-import { MAPS } from "../constants";
 
 const apiKey = process.env.API_KEY;
 if (!apiKey) {
@@ -10,9 +9,7 @@ if (!apiKey) {
 const ai = new GoogleGenAI({ apiKey });
 
 // --- Cache Helpers ---
-const CACHE_PREFIX = 'ow2-meta-cache-v5';
-const STRATEGY_BATCH_SIZE = 5;
-const STRATEGY_MAPS = MAPS.filter((map) => map !== 'All Maps');
+const CACHE_PREFIX = 'ow2-meta-cache-v4';
 
 // Key is based on Map + Settings (Role is EXCLUDED so we cache the whole map strategy)
 const generateMapKey = (map: string, settings: AppSettings) => {
@@ -108,12 +105,8 @@ export const getHeroRecommendations = async (
   const cacheKey = generateMapKey(map, settings);
   let fullStrategy = getFromCache<FullMapStrategy>(cacheKey);
 
-  // 2. If not in cache, fetch a batch of maps for the same settings and cache each map.
+  // 2. If not in cache, fetch ALL roles for this map
   if (!fullStrategy) {
-      const uncachedMaps = STRATEGY_MAPS.filter((candidateMap) => !getFromCache<FullMapStrategy>(generateMapKey(candidateMap, settings)));
-      const prioritizedMaps = [map, ...uncachedMaps.filter((candidateMap) => candidateMap !== map)];
-      const mapsToFetch = prioritizedMaps.slice(0, STRATEGY_BATCH_SIZE);
-
       // Define schema components explicitly with Schema type
       const recommendationItemSchema: Schema = {
           type: Type.OBJECT,
@@ -138,34 +131,24 @@ export const getHeroRecommendations = async (
           required: ["heroName", "role", "winRate", "pickRate", "reason"],
       };
 
-      const mapStrategySchema: Schema = {
+      const responseSchema: Schema = {
         type: Type.OBJECT,
         properties: {
-          mapName: { type: Type.STRING },
           tankRecommendations: { type: Type.ARRAY, items: recommendationItemSchema },
           damageRecommendations: { type: Type.ARRAY, items: recommendationItemSchema },
           supportRecommendations: { type: Type.ARRAY, items: recommendationItemSchema },
           bans: { type: Type.ARRAY, items: banItemSchema },
         },
-        required: ["mapName", "tankRecommendations", "damageRecommendations", "supportRecommendations", "bans"],
-      };
-
-      const responseSchema: Schema = {
-        type: Type.OBJECT,
-        properties: {
-          mapStrategies: { type: Type.ARRAY, items: mapStrategySchema },
-        },
-        required: ["mapStrategies"],
+        required: ["tankRecommendations", "damageRecommendations", "supportRecommendations", "bans"],
       };
 
       const poolList = settings.heroPool.join(", ");
-      const mapList = mapsToFetch.join(', ');
       
       const prompt = `
         You are an expert Overwatch 2 analyst. I need a hero pick and ban strategy for advanced players.
         
         Context:
-        - Maps: ${mapList}
+        - Map: ${map}
         - Input: ${settings.input}
         - Tier: ${settings.tier}
         - Region: ${settings.region}
@@ -174,27 +157,14 @@ export const getHeroRecommendations = async (
         My Personal Hero Pool (IDs): ${poolList}
         
         Task:
-        1. For EACH map in [${mapList}], identify the **Top 5** Heroes to Play for **EACH** role (Tank, Damage, Support) considering the current meta. 
+        1. Identify the **Top 5** Heroes to Play for **EACH** role (Tank, Damage, Support) on map '${map}' considering the current meta. 
            **CRITICAL: Only recommend heroes from "My Personal Hero Pool". If the top meta heroes are not in my pool, select the next best ones that ARE in my pool.**
-        2. For EACH map in [${mapList}], identify the Top 7 Heroes to Ban across ALL roles based on the highest win rates or frustration factors.
+        2. Identify the Top 7 Heroes to Ban across ALL roles based on the highest win rates or frustration factors.
         
         Data Requirements:
         - **Win Rate**: Must be a percentage (e.g., "54.2%").
         - **Pick Rate**: Must be a percentage (e.g., "5.1%"). Do NOT use terms like "High", "Medium", "Low".
         - Reason: Provide a very brief technical reason (1 sentence).
-
-        Output shape:
-        {
-          "mapStrategies": [
-            {
-              "mapName": "Exact map name",
-              "tankRecommendations": [...],
-              "damageRecommendations": [...],
-              "supportRecommendations": [...],
-              "bans": [...]
-            }
-          ]
-        }
         
         Use the Google Search tool to find the most recent win rate data from reliable tracker sites.
         
@@ -217,17 +187,8 @@ export const getHeroRecommendations = async (
             throw new Error("Empty response from AI");
         }
         
-        const parsed = JSON.parse(text) as { mapStrategies: Array<{ mapName: string } & FullMapStrategy> };
-        parsed.mapStrategies.forEach((mapStrategy) => {
-          saveToCache(generateMapKey(mapStrategy.mapName, settings), {
-            tankRecommendations: mapStrategy.tankRecommendations,
-            damageRecommendations: mapStrategy.damageRecommendations,
-            supportRecommendations: mapStrategy.supportRecommendations,
-            bans: mapStrategy.bans,
-          } as FullMapStrategy);
-        });
-
-        fullStrategy = getFromCache<FullMapStrategy>(cacheKey);
+        fullStrategy = JSON.parse(text) as FullMapStrategy;
+        saveToCache(cacheKey, fullStrategy);
 
       } catch (error) {
         console.error("Gemini API Error:", error);
