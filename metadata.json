@@ -1,0 +1,5 @@
+{
+  "name": "OW Meta Master",
+  "description": "Data informed Overwatch hero pick/ban advice",
+  "requestFramePermissions": []
+}
